@@ -25,17 +25,35 @@ jobs:
             https://www.googleapis.com/oauth2/v3/certs \
             --output google-jwks.download.json
           jq -e '.keys | type == "array" and length > 0' google-jwks.download.json >/dev/null
-          jq -S . google-jwks.download.json > google-jwks.json
+
+          now="$(date -u +%s)"
+          if [[ ! -f google-jwks-observed.json ]]; then
+            printf '{"keys":{}}\n' > google-jwks-observed.json
+          fi
+
+          jq -n --argjson now "$now" \
+            --slurpfile observed google-jwks-observed.json \
+            --slurpfile downloaded google-jwks.download.json '
+              reduce $downloaded[0].keys[] as $key
+                ($observed[0]; .keys[$key.kid] = {lastSeen: $now, key: $key})
+              | .keys |= with_entries(select(.value.lastSeen >= ($now - 259200)))
+            ' | jq -S . > google-jwks-observed.next.json
+          mv google-jwks-observed.next.json google-jwks-observed.json
+
+          jq -S '{keys: [.keys[].key] | sort_by(.kid)}' \
+            google-jwks-observed.json > google-jwks.json
           rm google-jwks.download.json
 
       - name: Publish changes
         run: |
           set -euo pipefail
-          if git diff --quiet -- google-jwks.json && git ls-files --error-unmatch google-jwks.json >/dev/null 2>&1; then
+          if git diff --quiet -- google-jwks.json google-jwks-observed.json \
+            && git ls-files --error-unmatch google-jwks.json >/dev/null 2>&1 \
+            && git ls-files --error-unmatch google-jwks-observed.json >/dev/null 2>&1; then
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add google-jwks.json
+          git add google-jwks.json google-jwks-observed.json
           git commit -m "Refresh Google JWKS"
           git push
